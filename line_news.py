@@ -1,6 +1,6 @@
 """
-Arsenal & Barcelona Daily News → LINE Messaging API
-- สรุปและแปลเป็นภาษาไทยด้วย Claude API
+Arsenal & Barcelona Daily News → LINE Flex Message
+- แปลภาษาไทยด้วย Google Translate (ฟรี)
 - กรองเฉพาะฟุตบอลชายเท่านั้น
 - รันผ่าน GitHub Actions ทุกวัน 8 โมงเช้า (ไทย)
 """
@@ -20,10 +20,17 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 TH_TZ = timezone(timedelta(hours=7))
 
+TH_MONTHS = [
+    "", "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+    "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.",
+]
+
 TEAMS = {
     "arsenal": {
         "name": "Arsenal",
-        "color": "#EF0107",
+        "header_color": "#CC0000",
+        "badge_color": "#FF3333",
+        "light_color": "#FFE5E5",
         "emoji": "🔴",
         "keywords": [
             "arsenal", "gunners", "emirates", "arteta",
@@ -33,7 +40,9 @@ TEAMS = {
     },
     "barcelona": {
         "name": "Barcelona",
-        "color": "#004D98",
+        "header_color": "#003780",
+        "badge_color": "#0057B8",
+        "light_color": "#E5EEFF",
         "emoji": "🔵",
         "keywords": [
             "barcelona", "barça", "barca", "blaugrana",
@@ -44,7 +53,6 @@ TEAMS = {
     },
 }
 
-# คำที่บ่งบอกว่าเป็นฟุตบอลหญิง — ตัดออกทั้งหมด
 WOMENS_KEYWORDS = [
     "women", "women's", "womens", "wsl", "nwsl", "fa wsl",
     "lionesses", "ladies", "female", "girls", "femeni", "féminin",
@@ -62,8 +70,12 @@ RSS_FEEDS = [
 
 
 # ============================================================
-# Fetch & Filter
+# Helpers
 # ============================================================
+
+def th_date(dt: datetime) -> str:
+    return f"{dt.day} {TH_MONTHS[dt.month]} {dt.year + 543}"
+
 
 def is_womens(title: str, summary: str) -> bool:
     text = (title + " " + summary).lower()
@@ -74,6 +86,10 @@ def classify(title: str, summary: str) -> list[str]:
     text = (title + " " + summary).lower()
     return [k for k, v in TEAMS.items() if any(kw in text for kw in v["keywords"])]
 
+
+# ============================================================
+# Fetch
+# ============================================================
 
 def fetch_news(hours_back: int = 24) -> dict[str, list[dict]]:
     cutoff = datetime.now(tz=TH_TZ) - timedelta(hours=hours_back)
@@ -92,11 +108,7 @@ def fetch_news(hours_back: int = 24) -> dict[str, list[dict]]:
             summary = (entry.get("summary") or entry.get("description") or "").strip()
             link    = entry.get("link", "")
 
-            if link in seen_links:
-                continue
-
-            # ตัดข่าวฟุตบอลหญิงออก
-            if is_womens(title, summary):
+            if link in seen_links or is_womens(title, summary):
                 continue
 
             matched = classify(title, summary)
@@ -119,16 +131,15 @@ def fetch_news(hours_back: int = 24) -> dict[str, list[dict]]:
                 continue
 
             seen_links.add(link)
-            article = {
+            art = {
                 "title":   title,
-                "summary": summary[:300].rstrip(),
+                "summary": summary[:250].rstrip(),
                 "source":  feed_info["name"],
                 "pub":     pub,
             }
             for team_key in matched:
-                results[team_key].append(article)
+                results[team_key].append(art)
 
-    # Deduplicate + sort newest first
     for key in results:
         seen_titles: set[str] = set()
         unique = []
@@ -137,104 +148,268 @@ def fetch_news(hours_back: int = 24) -> dict[str, list[dict]]:
             if norm not in seen_titles:
                 seen_titles.add(norm)
                 unique.append(art)
-        results[key] = unique[:8]  # max 8 ข่าวต่อทีม
+        results[key] = unique[:7]
 
     return results
 
 
 # ============================================================
-# Translate with Google Translate (ฟรี ไม่ต้อง API Key)
+# Translate
 # ============================================================
 
-translator = GoogleTranslator(source="auto", target="th")
+_translator = GoogleTranslator(source="auto", target="th")
 
 
-def translate_article(article: dict) -> str:
-    """แปล title + summary เป็นภาษาไทย แล้วรวมเป็นประโยคเดียว"""
+def safe_translate(text: str) -> str:
+    if not text:
+        return ""
     try:
-        title_th = translator.translate(article["title"])
+        return _translator.translate(text[:400])
     except Exception:
-        title_th = article["title"]
+        return text
 
-    # แปล summary ถ้ามี
-    summary_th = ""
-    if article.get("summary"):
-        try:
-            # ตัดให้สั้นลงก่อนส่งแปล
-            short = article["summary"][:200]
-            summary_th = translator.translate(short)
-        except Exception:
-            pass
 
-    if summary_th and summary_th.lower() != title_th.lower():
-        return f"{title_th} — {summary_th}"
-    return title_th
+def translate_article(art: dict) -> tuple[str, str]:
+    """Return (title_th, summary_th)"""
+    title_th   = safe_translate(art["title"])
+    summary_th = safe_translate(art["summary"]) if art.get("summary") else ""
+    # ถ้า summary แปลออกมาเหมือน title ไม่ต้องแสดง
+    if summary_th and summary_th.strip().lower() == title_th.strip().lower():
+        summary_th = ""
+    return title_th, summary_th
 
 
 # ============================================================
-# LINE Message Builder (Text-based, ไม่มี link)
+# Flex Message Builder
 # ============================================================
 
-def build_line_messages(news: dict[str, list[dict]]) -> list[dict]:
-    messages = []
-    date_str = datetime.now(TH_TZ).strftime("%-d %B %Y").replace(
-        "January","มกราคม").replace("February","กุมภาพันธ์").replace(
-        "March","มีนาคม").replace("April","เมษายน").replace(
-        "May","พฤษภาคม").replace("June","มิถุนายน").replace(
-        "July","กรกฎาคม").replace("August","สิงหาคม").replace(
-        "September","กันยายน").replace("October","ตุลาคม").replace(
-        "November","พฤศจิกายน").replace("December","ธันวาคม")
+def _article_box(art: dict, badge_color: str) -> dict:
+    title_th, summary_th = translate_article(art)
+    time_str = art["pub"].strftime("%H:%M")
 
-    has_news = any(len(arts) > 0 for arts in news.values())
-
-    if not has_news:
-        return [{
+    contents = [
+        # แถวบน: เวลา + แหล่งข่าว
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "width": "46px",
+                    "height": "20px",
+                    "cornerRadius": "10px",
+                    "backgroundColor": badge_color,
+                    "justifyContent": "center",
+                    "contents": [{
+                        "type": "text",
+                        "text": time_str,
+                        "color": "#FFFFFF",
+                        "size": "xxs",
+                        "align": "center",
+                        "offsetTop": "1px",
+                    }],
+                },
+                {
+                    "type": "text",
+                    "text": art["source"],
+                    "size": "xxs",
+                    "color": "#AAAAAA",
+                    "align": "end",
+                    "flex": 1,
+                    "gravity": "center",
+                },
+            ],
+        },
+        # หัวข่าวภาษาไทย
+        {
             "type": "text",
-            "text": f"⚽ ข่าวฟุตบอลประจำวัน {date_str}\n\nไม่มีข่าวใหม่ใน 24 ชั่วโมงที่ผ่านมา"
-        }]
+            "text": title_th or art["title"],
+            "size": "sm",
+            "weight": "bold",
+            "color": "#111111",
+            "wrap": True,
+            "maxLines": 3,
+            "margin": "sm",
+        },
+    ]
+
+    # เพิ่ม summary ถ้ามี
+    if summary_th:
+        contents.append({
+            "type": "text",
+            "text": summary_th,
+            "size": "xs",
+            "color": "#666666",
+            "wrap": True,
+            "maxLines": 3,
+            "margin": "xs",
+        })
+
+    return {
+        "type": "box",
+        "layout": "vertical",
+        "spacing": "none",
+        "paddingBottom": "12px",
+        "contents": contents,
+    }
+
+
+def _team_bubble(team_key: str, articles: list[dict], date_str: str) -> dict:
+    info = TEAMS[team_key]
+
+    # Header
+    header = {
+        "type": "box",
+        "layout": "vertical",
+        "backgroundColor": info["header_color"],
+        "paddingAll": "16px",
+        "contents": [
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": info["emoji"],
+                        "size": "xxl",
+                        "flex": 0,
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "flex": 1,
+                        "paddingStart": "8px",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": info["name"],
+                                "color": "#FFFFFF",
+                                "size": "xl",
+                                "weight": "bold",
+                            },
+                            {
+                                "type": "text",
+                                "text": f"ข่าวล่าสุด {len(articles)} รายการ",
+                                "color": "#DDDDDD",
+                                "size": "xs",
+                            },
+                        ],
+                    },
+                ],
+            },
+            {
+                "type": "text",
+                "text": f"⚽ ฟุตบอลชาย · {date_str}",
+                "color": "#BBBBBB",
+                "size": "xxs",
+                "margin": "sm",
+            },
+        ],
+    }
+
+    # Body — articles with separators
+    body_contents = []
+    for i, art in enumerate(articles):
+        body_contents.append(_article_box(art, info["badge_color"]))
+        if i < len(articles) - 1:
+            body_contents.append({
+                "type": "separator",
+                "color": "#EEEEEE",
+                "margin": "none",
+            })
+
+    body = {
+        "type": "box",
+        "layout": "vertical",
+        "paddingAll": "14px",
+        "spacing": "none",
+        "contents": body_contents,
+    }
+
+    return {
+        "type": "bubble",
+        "size": "mega",
+        "header": header,
+        "body": body,
+        "styles": {
+            "header": {"separator": False},
+            "body": {"backgroundColor": "#FAFAFA"},
+        },
+    }
+
+
+def _no_news_bubble(date_str: str) -> dict:
+    return {
+        "type": "bubble",
+        "size": "kilo",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "justifyContent": "center",
+            "paddingAll": "24px",
+            "spacing": "md",
+            "contents": [
+                {"type": "text", "text": "⚽", "align": "center", "size": "5xl"},
+                {
+                    "type": "text",
+                    "text": "ไม่มีข่าวใหม่",
+                    "align": "center",
+                    "size": "lg",
+                    "weight": "bold",
+                    "color": "#333333",
+                },
+                {
+                    "type": "text",
+                    "text": f"Arsenal & Barcelona\n{date_str}",
+                    "align": "center",
+                    "size": "sm",
+                    "color": "#888888",
+                    "wrap": True,
+                },
+            ],
+        },
+    }
+
+
+def build_flex_message(news: dict[str, list[dict]]) -> dict:
+    date_str = th_date(datetime.now(TH_TZ))
+    bubbles = []
 
     for team_key in ["arsenal", "barcelona"]:
         articles = news.get(team_key, [])
-        if not articles:
-            continue
+        if articles:
+            info = TEAMS[team_key]
+            print(f"   แปล {info['name']} {len(articles)} ข่าว...")
+            bubbles.append(_team_bubble(team_key, articles, date_str))
 
-        info = TEAMS[team_key]
-        print(f"   กำลังแปล {info['name']} {len(articles)} ข่าว ด้วย Google Translate...")
+    if not bubbles:
+        bubbles.append(_no_news_bubble(date_str))
 
-        lines = [f"{info['emoji']} {info['name']} — {date_str}"]
-        lines.append("─" * 28)
-
-        for i, art in enumerate(articles, 1):
-            time_str = art["pub"].strftime("%H:%M")
-            thai_text = translate_article(art)
-            lines.append(f"{i}. [{time_str}] {thai_text}")
-
-        text = "\n".join(lines)
-
-        messages.append({
-            "type": "text",
-            "text": text,
-        })
-
-    return messages
+    return {
+        "type": "flex",
+        "altText": f"⚽ ข่าวฟุตบอลชาย Arsenal & Barcelona — {date_str}",
+        "contents": {
+            "type": "carousel",
+            "contents": bubbles,
+        },
+    }
 
 
 # ============================================================
 # Send LINE
 # ============================================================
 
-def send_line(messages: list[dict]) -> None:
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Authorization": f"Bearer {LINE_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    # LINE รับได้สูงสุด 5 messages ต่อ request
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": messages[:5],
-    }
-    resp = requests.post(url, headers=headers, json=payload, timeout=10)
+def send_line(message: dict) -> None:
+    resp = requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={
+            "Authorization": f"Bearer {LINE_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"to": LINE_USER_ID, "messages": [message]},
+        timeout=15,
+    )
     if resp.status_code == 200:
         print("✅ ส่ง LINE สำเร็จ")
     else:
@@ -246,16 +421,14 @@ def send_line(messages: list[dict]) -> None:
 # ============================================================
 
 def main():
-    print(f"🕗 ดึงข่าว Arsenal & Barcelona — {datetime.now(TH_TZ).strftime('%d/%m/%Y %H:%M')} (TH)")
+    print(f"🕗 {datetime.now(TH_TZ).strftime('%d/%m/%Y %H:%M')} (TH) — ดึงข่าวฟุตบอลชาย")
 
     news = fetch_news(hours_back=24)
-
     for team_key, info in TEAMS.items():
-        count = len(news.get(team_key, []))
-        print(f"   {info['name']}: {count} ข่าว (ชายเท่านั้น)")
+        print(f"   {info['name']}: {len(news.get(team_key, []))} ข่าว")
 
-    messages = build_line_messages(news)
-    send_line(messages)
+    flex = build_flex_message(news)
+    send_line(flex)
 
 
 if __name__ == "__main__":
