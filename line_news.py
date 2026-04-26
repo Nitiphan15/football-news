@@ -134,6 +134,7 @@ def fetch_news(hours_back: int = 24) -> dict[str, list[dict]]:
             art = {
                 "title":   title,
                 "summary": summary[:250].rstrip(),
+                "link":    link,
                 "source":  feed_info["name"],
                 "pub":     pub,
             }
@@ -186,6 +187,7 @@ def translate_article(art: dict) -> tuple[str, str]:
 def _article_box(art: dict, badge_color: str) -> dict:
     title_th, summary_th = translate_article(art)
     time_str = art["pub"].strftime("%H:%M")
+    link = art.get("link", "")
 
     contents = [
         # แถวบน: เวลา + แหล่งข่าว
@@ -221,7 +223,7 @@ def _article_box(art: dict, badge_color: str) -> dict:
                 },
             ],
         },
-        # หัวข่าวภาษาไทย
+        # หัวข่าวภาษาไทย (ไม่จำกัดบรรทัด)
         {
             "type": "text",
             "text": title_th or art["title"],
@@ -229,21 +231,38 @@ def _article_box(art: dict, badge_color: str) -> dict:
             "weight": "bold",
             "color": "#111111",
             "wrap": True,
-            "maxLines": 3,
             "margin": "sm",
         },
     ]
 
-    # เพิ่ม summary ถ้ามี
+    # สรุปข่าวไทย (แสดงเต็ม ไม่ตัด)
     if summary_th:
         contents.append({
             "type": "text",
             "text": summary_th,
             "size": "xs",
-            "color": "#666666",
+            "color": "#555555",
             "wrap": True,
-            "maxLines": 3,
             "margin": "xs",
+        })
+
+    # ปุ่ม "อ่านข่าวเต็ม" ถ้ามี link
+    if link:
+        contents.append({
+            "type": "box",
+            "layout": "vertical",
+            "margin": "sm",
+            "contents": [{
+                "type": "button",
+                "action": {
+                    "type": "uri",
+                    "label": "อ่านข่าวเต็ม →",
+                    "uri": link,
+                },
+                "style": "link",
+                "height": "sm",
+                "color": badge_color,
+            }],
         })
 
     return {
