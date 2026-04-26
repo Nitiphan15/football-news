@@ -1,0 +1,33 @@
+name: ⚽ Arsenal & Barcelona Daily News
+
+on:
+  # ทุกวัน 8 โมงเช้า เวลาไทย (UTC+7 = 01:00 UTC)
+  schedule:
+    - cron: "0 1 * * *"
+
+  # กดรันมือได้จาก GitHub UI
+  workflow_dispatch:
+
+jobs:
+  send-news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install feedparser requests python-dateutil
+
+      - name: Run news notifier
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python line_news.py
