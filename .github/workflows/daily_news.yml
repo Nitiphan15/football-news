@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install feedparser requests python-dateutil
+        run: pip install feedparser requests python-dateutil deep-translator
 
       - name: Run news notifier
         env:
